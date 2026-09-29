@@ -1,0 +1,202 @@
+name: CD
+
+on:
+  # Déclenché après la fin du workflow CI
+  workflow_run:
+    workflows: ["CI"]
+    branches:
+      - main
+    types:
+      - completed
+  # Déclencheur manuel avec sélection de l'environnement
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environnement de déploiement'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+# Moindre privilège : lecture du code et écriture sur GitHub Container Registry (GHCR)
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ====================================================
+  # 1. Job Build & Push : Construction et publication GHCR
+  # ====================================================
+  build-and-push:
+    name: Build & Push GHCR
+    # Ne tourne que si la CI est verte sur main OU si déclenché manuellement
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      image_name: ${{ steps.prep.outputs.image_name }}
+      short_sha: ${{ steps.prep.outputs.short_sha }}
+      semver_tag: ${{ steps.prep.outputs.semver_tag }}
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Préparation des tags d'image
+        id: prep
+        run: |
+          # Nom d'image en minuscules pour GHCR
+          IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/sentence-analyzer"
+          IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+
+          # SHA court du commit (7 caractères)
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
+          # Tag sémantique basé sur le numéro de run (ex: 1.0.42)
+          SEMVER_TAG="v1.0.${{ github.run_number }}"
+
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "semver_tag=$SEMVER_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Connexion au registre GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configuration de Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construction et push des images avec les 3 tags requis
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          build-args: |
+            APP_VERSION=${{ steps.prep.outputs.semver_tag }}
+            COMMIT_SHA=${{ steps.prep.outputs.short_sha }}
+          tags: |
+            ${{ steps.prep.outputs.image_name }}:latest
+            ${{ steps.prep.outputs.image_name }}:${{ steps.prep.outputs.short_sha }}
+            ${{ steps.prep.outputs.image_name }}:${{ steps.prep.outputs.semver_tag }}
+
+  # ====================================================
+  # 2. Job Deploy : Déploiement, vérification et rollback
+  # ====================================================
+  deploy:
+    name: Déploiement & Healthcheck
+    needs: [build-and-push]
+    # Le job deploy ne tourne que si on est sur la branche main ou via workflow_dispatch
+    if: >-
+      github.ref == 'refs/heads/main' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Connexion au registre GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Déploiement de l'application et de Redis
+        env:
+          IMAGE_NAME: ${{ needs.build-and-push.outputs.image_name }}
+          TARGET_TAG: ${{ needs.build-and-push.outputs.short_sha }}
+        run: |
+          echo "============================================="
+          echo "Déploiement de la version ${TARGET_TAG}..."
+          echo "Environnement : ${{ github.event.inputs.environment || 'production' }}"
+          echo "============================================="
+
+          # Création du réseau Docker si inexistant
+          docker network inspect app-network >/dev/null 2>&1 || docker network create app-network
+
+          # Lancement du service Redis s'il n'est pas déjà démarré
+          if ! docker ps --format '{{.Names}}' | grep -q "^phrase-parser-redis$"; then
+            docker run -d --name phrase-parser-redis \
+              --network app-network \
+              -p 6379:6379 \
+              --restart unless-stopped \
+              redis:7.2-alpine
+          fi
+
+          # Sauvegarde du tag précédent pour le rollback
+          PREVIOUS_TAG=$(docker inspect --format='{{.Config.Image}}' phrase-parser-api 2>/dev/null || echo "")
+          echo "PREVIOUS_IMAGE=${PREVIOUS_TAG}" >> $GITHUB_ENV
+
+          # Arrêt de l'ancien conteneur applicatif
+          docker stop phrase-parser-api 2>/dev/null || true
+          docker rm phrase-parser-api 2>/dev/null || true
+
+          # Lancement du nouveau conteneur avec l'image fraîchement poussée
+          docker run -d --name phrase-parser-api \
+            --network app-network \
+            -p 8000:8000 \
+            -e REDIS_HOST=phrase-parser-redis \
+            -e REDIS_PORT=6379 \
+            -e APP_VERSION=${{ needs.build-and-push.outputs.semver_tag }} \
+            -e COMMIT_SHA=${TARGET_TAG} \
+            --restart unless-stopped \
+            ${IMAGE_NAME}:${TARGET_TAG}
+
+      - name: Vérification post-déploiement avec retries et Rollback
+        env:
+          PREVIOUS_IMAGE: ${{ env.PREVIOUS_IMAGE }}
+        run: |
+          echo "Vérification post-déploiement sur http://localhost:8000/health..."
+          MAX_RETRIES=3
+          DELAY=5
+          SUCCESS=0
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Tentative $i/$MAX_RETRIES..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health || true)
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo ">>> Healthcheck OK (Code HTTP 200) !"
+              SUCCESS=1
+              break
+            else
+              echo "Healthcheck en échec (Code HTTP: $HTTP_CODE). Attente de ${DELAY}s..."
+              sleep $DELAY
+            fi
+          done
+
+          # Procédure de Rollback si le healthcheck échoue après les 3 tentatives
+          if [ $SUCCESS -ne 1 ]; then
+            echo "=========================================================="
+            echo "ALERTE : Le healthcheck post-déploiement a échoué !"
+            echo "Lancement de la procédure de ROLLBACK automatique..."
+            echo "=========================================================="
+
+            docker stop phrase-parser-api 2>/dev/null || true
+            docker rm phrase-parser-api 2>/dev/null || true
+
+            if [ -n "$PREVIOUS_IMAGE" ]; then
+              echo "Re-déploiement de l'image précédente : $PREVIOUS_IMAGE"
+              docker pull "$PREVIOUS_IMAGE" || true
+              docker run -d --name phrase-parser-api \
+                --network app-network \
+                -p 8000:8000 \
+                -e REDIS_HOST=phrase-parser-redis \
+                -e REDIS_PORT=6379 \
+                "$PREVIOUS_IMAGE"
+            else
+              echo "Aucune image précédente disponible pour le rollback."
+            fi
+
+            echo "Échec du job de déploiement suite au rejet du healthcheck."
+            exit 1
+          fi
+
+          echo "Déploiement validé avec succès !"
