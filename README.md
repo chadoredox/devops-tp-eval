@@ -16,7 +16,7 @@ L'application intègre un **cache Redis** pour accélérer les requêtes récurr
 
 ## 2. Lancement en Local
 
-### Option A : Avec Docker Compose (recommandé)
+### Option A : Avec Docker Compose
 
 Construit les images et démarre l'ensemble de la stack (API, Redis et Prometheus) en une seule commande :
 
@@ -39,34 +39,7 @@ Arrêter les services :
 docker compose down
 ```
 
----
 
-### Option B : Lancement manuel (hors conteneur)
-
-1. **Créer et activer un environnement virtuel :**
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate       # Linux / macOS
-   # ou sous Windows PowerShell :
-   .\.venv\Scripts\Activate.ps1
-   ```
-
-2. **Installer les dépendances :**
-   ```bash
-   pip install -r requirements.txt -r requirements-dev.txt
-   ```
-
-3. **Démarrer un conteneur Redis :**
-   ```bash
-   docker run -d --name redis-local -p 6379:6379 redis:7.2-alpine
-   ```
-
-4. **Lancer le serveur API :**
-   ```bash
-   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-   ```
-
----
 
 ## 3. Endpoints de l'API
 
