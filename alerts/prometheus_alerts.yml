@@ -1,17 +1,7 @@
 groups:
   - name: sentence_analyzer_alerts
     rules:
-      # =========================================================================
-      # Règle 1 : Taux d'erreurs HTTP 5xx anormalement élevé
-      # =========================================================================
-      # Formule PromQL : ratio requêtes 5xx / total requêtes sur fenêtre 5 minutes
-      # Seuil : > 5% (0.05)
-      # Durée (for) : 2 minutes
-      # Justification :
-      # - L'utilisation d'un ratio évite les fausses alertes lors des pics de charge.
-      # - Un taux de 5% d'erreurs 5xx est critique (SLA 99%).
-      # - La durée de 2 minutes élimine le bruit causé par un redémarrage ponctuel.
-      # =========================================================================
+      
       - alert: HighHttp5xxErrorRate
         expr: >-
           (
@@ -30,19 +20,7 @@ groups:
             (valeur actuelle : {{ $value | humanizePercentage }}).
             Vérifier l'état de Redis et les exceptions applicatives.
 
-      # =========================================================================
-      # Règle 2 : Latence dégradée au 95ème percentile (p95)
-      # =========================================================================
-      # Formule PromQL : calcul du p95 via histogram_quantile par endpoint
-      # Seuil : > 500 ms (0.5 secondes)
-      # Durée (for) : 3 minutes
-      # Justification :
-      # - Le p95 est préféré à la moyenne arithmétique car la moyenne masque les anomalies
-      #   extrêmes subies par les utilisateurs.
-      # - Pour une API de parsing de phrase avec cache en mémoire Redis, une réponse
-      #   normale prend moins de 30 ms. Dépasser 500 ms signale une contention CPU ou réseau.
-      # - La durée for: 3m évite d'alerter sur un pic ponctuel (warmup, garbage collection).
-      # =========================================================================
+    
       - alert: HighHttpLatencyP95
         expr: >-
           histogram_quantile(
