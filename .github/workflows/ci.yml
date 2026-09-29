@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+# Principe du moindre privilège
+permissions:
+  contents: read
+
+jobs:
+  # ====================================================
+  # 1. Job Lint : Analyse statique Python et validation YAML
+  # ====================================================
+  lint:
+    name: Lint & Qualité
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Configuration de l'environnement Python via action locale
+        uses: ./.github/actions/setup-app
+        with:
+          python-version: '3.11'
+
+      - name: Vérification du code Python (Flake8)
+        run: |
+          flake8 app/ tests/ --count --max-line-length=120 --statistics
+
+      - name: Validation de la syntaxe des fichiers YAML (yamllint)
+        run: |
+          yamllint -c .yamllint.yml .github/workflows/ .github/actions/ docker-compose.yml alerts/
+
+  # ====================================================
+  # 2. Job Test : Tests d'intégration avec Matrix et Redis
+  # ====================================================
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+
+    # Service Redis requis par l'application pour les tests d'intégration
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Configuration Python et installation dépendances via action locale
+        uses: ./.github/actions/setup-app
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Exécution des tests avec génération des rapports JUnit et Couverture
+        env:
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+        run: |
+          mkdir -p reports
+          pytest --junitxml=reports/junit-${{ matrix.python-version }}.xml \
+                 --cov=app \
+                 --cov-report=xml:reports/coverage-${{ matrix.python-version }}.xml \
+                 --cov-report=term \
+                 tests/
+
+      - name: Publication des rapports de tests en artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.python-version }}
+          path: reports/
+          retention-days: 2
+
+  # ====================================================
+  # 3. Job Build : Test de construction de l'image Docker
+  # ====================================================
+  build:
+    name: Build Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Validation du build Docker multi-stage
+        run: |
+          docker build -t phrase-parser-api:ci-test .
+
+  # ====================================================
+  # 4. Job Ci-ok : Gatekeeper final obligatoire pour le merge
+  # ====================================================
+  ci-ok:
+    name: Ci-ok (Validation finale)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint, test, build]
+    steps:
+      - name: Téléchargement des artifacts de tests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-reports-*
+          path: downloaded-reports
+
+      - name: Validation globale
+        run: |
+          echo "============================================="
+          echo "Tous les jobs de CI (Lint, Test, Build) ont validé le code."
+          echo "Les rapports de tests sont récupérés avec succès."
+          echo "Le merge sur main est autorisé."
+          echo "============================================="
+          ls -la downloaded-reports/

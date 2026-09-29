@@ -1,0 +1,23 @@
+name: 'Setup Python & Dependencies'
+description: 'Action locale réutilisable pour initialiser Python, gérer le cache pip et installer les dépendances'
+
+inputs:
+  python-version:
+    description: 'Version de Python à configurer'
+    required: false
+    default: '3.11'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Initialisation du runtime Python et cache pip
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: 'pip'
+
+    - name: Installation des dépendances applicatives et de test
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt -r requirements-dev.txt
