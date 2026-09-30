@@ -39,7 +39,7 @@ Arrêter les services :
 docker compose down
 ```
 
-
+---
 
 ## 3. Endpoints de l'API
 

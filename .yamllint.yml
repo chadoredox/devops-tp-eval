@@ -8,3 +8,4 @@ rules:
     min-spaces-from-content: 1
   document-start: disable
   truthy: disable
+  trailing-spaces: disable

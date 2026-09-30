@@ -1,7 +1,6 @@
 groups:
   - name: sentence_analyzer_alerts
     rules:
-      
       - alert: HighHttp5xxErrorRate
         expr: >-
           (
@@ -20,7 +19,6 @@ groups:
             (valeur actuelle : {{ $value | humanizePercentage }}).
             Vérifier l'état de Redis et les exceptions applicatives.
 
-    
       - alert: HighHttpLatencyP95
         expr: >-
           histogram_quantile(
